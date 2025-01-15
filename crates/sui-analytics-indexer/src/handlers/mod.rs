@@ -176,7 +176,6 @@ async fn get_move_struct<T: PackageStore>(
     contents: &[u8],
     resolver: &Resolver<T>,
 ) -> Result<MoveStruct> {
-    info!("byeee");
     let move_struct = match resolver
         .type_layout(TypeTag::Struct(Box::new(struct_tag.clone())))
         .await?
