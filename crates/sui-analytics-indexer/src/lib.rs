@@ -34,6 +34,7 @@ use crate::handlers::df_handler::DynamicFieldHandler;
 use crate::handlers::event_handler::EventHandler;
 use crate::handlers::move_call_handler::MoveCallHandler;
 use crate::handlers::object_handler::ObjectHandler;
+use crate::handlers::ownership_handler::OwnershipHandler;
 use crate::handlers::package_handler::PackageHandler;
 use crate::handlers::transaction_handler::TransactionHandler;
 use crate::handlers::transaction_objects_handler::TransactionObjectsHandler;
@@ -42,7 +43,7 @@ use crate::handlers::AnalyticsHandler;
 use crate::tables::{
     CheckpointEntry, DynamicFieldEntry, EventEntry, InputObjectKind, MoveCallEntry,
     MovePackageEntry, ObjectEntry, ObjectStatus, OwnerType, TransactionEntry,
-    TransactionObjectEntry, WrappedObjectEntry,
+    TransactionObjectEntry, WrappedObjectEntry, OwnershipEntry
 };
 use crate::writers::csv_writer::CSVWriter;
 use crate::writers::parquet_writer::ParquetWriter;
@@ -51,14 +52,18 @@ use crate::writers::AnalyticsWriter;
 pub mod analytics_metrics;
 pub mod analytics_processor;
 pub mod errors;
+pub mod schema;
 mod handlers;
 mod package_store;
 pub mod tables;
 mod writers;
+#[macro_use]
+extern crate diesel;
 
 const EPOCH_DIR_PREFIX: &str = "epoch_";
 const CHECKPOINT_DIR_PREFIX: &str = "checkpoints";
 const OBJECT_DIR_PREFIX: &str = "objects";
+const OWNERSHIP_DIR_PREFIX: &str = "ownership";
 const TRANSACTION_DIR_PREFIX: &str = "transactions";
 const EVENT_DIR_PREFIX: &str = "events";
 const TRANSACTION_OBJECT_DIR_PREFIX: &str = "transaction_objects";
@@ -329,6 +334,7 @@ pub enum FileType {
     MovePackage,
     DynamicField,
     WrappedObject,
+    Ownership
 }
 
 impl FileType {
@@ -338,6 +344,7 @@ impl FileType {
             FileType::Transaction => Path::from(TRANSACTION_DIR_PREFIX),
             FileType::TransactionObjects => Path::from(TRANSACTION_OBJECT_DIR_PREFIX),
             FileType::Object => Path::from(OBJECT_DIR_PREFIX),
+            FileType::Ownership => Path::from(OWNERSHIP_DIR_PREFIX),
             FileType::Event => Path::from(EVENT_DIR_PREFIX),
             FileType::MoveCall => Path::from(MOVE_CALL_PREFIX),
             FileType::MovePackage => Path::from(MOVE_PACKAGE_PREFIX),
@@ -368,6 +375,7 @@ pub enum ParquetValue {
     Str(String),
     Bool(bool),
     I64(i64),
+    Optioni64(Option<i64>),
     OptionU64(Option<u64>),
     OptionStr(Option<String>),
 }
@@ -393,6 +401,12 @@ impl From<String> for ParquetValue {
 impl From<Option<u64>> for ParquetValue {
     fn from(value: Option<u64>) -> Self {
         Self::OptionU64(value)
+    }
+}
+
+impl From<Option<i64>> for ParquetValue {
+    fn from(value: Option<i64>) -> Self {
+        Self::Optioni64(value)
     }
 }
 
@@ -713,6 +727,33 @@ pub async fn make_object_processor(
     .await
 }
 
+pub async fn make_ownership_processor(
+    config: AnalyticsIndexerConfig,
+    metrics: AnalyticsMetrics,
+) -> Result<Processor> {
+    let starting_checkpoint_seq_num =
+        get_starting_checkpoint_seq_num(config.clone(), FileType::Ownership).await?;
+    let handler: Box<dyn AnalyticsHandler<OwnershipEntry>> = Box::new(
+        OwnershipHandler::new(&config.package_cache_path, &config.rest_url, &config.package_id_filter),
+    );
+    let writer = make_writer::<OwnershipEntry>(
+        config.clone(),
+        FileType::Ownership,
+        starting_checkpoint_seq_num,
+    )?;
+    let max_checkpoint_reader = make_max_checkpoint_reader(&config).await?;
+    Processor::new::<OwnershipEntry>(
+        handler,
+        writer,
+        max_checkpoint_reader,
+        starting_checkpoint_seq_num,
+        metrics,
+        config,
+    )
+    .await
+}
+
+
 pub async fn make_event_processor(
     config: AnalyticsIndexerConfig,
     metrics: AnalyticsMetrics,
@@ -905,6 +946,7 @@ pub async fn make_analytics_processor(
     match config.file_type {
         FileType::Checkpoint => make_checkpoint_processor(config, metrics).await,
         FileType::Object => make_object_processor(config, metrics).await,
+        FileType::Ownership => make_ownership_processor(config, metrics).await,
         FileType::Transaction => make_transaction_processor(config, metrics).await,
         FileType::Event => make_event_processor(config, metrics).await,
         FileType::TransactionObjects => make_transaction_objects_processor(config, metrics).await,

@@ -19,6 +19,7 @@ use sui_types::transaction::TransactionDataAPI;
 
 use crate::tables::{InputObjectKind, ObjectStatus, OwnerType};
 use crate::FileType;
+use tracing::info;
 
 pub mod checkpoint_handler;
 pub mod df_handler;
@@ -175,6 +176,7 @@ async fn get_move_struct<T: PackageStore>(
     contents: &[u8],
     resolver: &Resolver<T>,
 ) -> Result<MoveStruct> {
+    info!("byeee");
     let move_struct = match resolver
         .type_layout(TypeTag::Struct(Box::new(struct_tag.clone())))
         .await?

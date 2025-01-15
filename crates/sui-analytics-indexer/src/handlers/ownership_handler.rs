@@ -1,43 +1,105 @@
-// Copyright (c) Mysten Labs, Inc.
-// SPDX-License-Identifier: Apache-2.0
-
-use anyhow::Result;
-use fastcrypto::encoding::{Base64, Encoding};
+use diesel::prelude::*;
+use diesel::pg::PgConnection;
+use diesel::result::Error;
 use std::path::Path;
 use sui_data_ingestion_core::Worker;
 use sui_types::SYSTEM_PACKAGE_ADDRESSES;
-use tokio::sync::Mutex;
-use postgres::{Client, NoTls};
-
-use sui_json_rpc_types::SuiMoveStruct;
-use sui_package_resolver::Resolver;
-use sui_rpc_api::{CheckpointData, CheckpointTransaction};
-use sui_types::base_types::ObjectID;
-use sui_types::effects::TransactionEffects;
+use crate::schema::ownership;
+// use sui_types::{Object, ObjectStatusTracker, State, OwnershipEntry};
 use sui_types::object::Object;
-
+use sui_types::effects::TransactionEffects;
+use crate::tables::{OwnershipEntry, ObjectStatus};
+use tokio::sync::Mutex;
 use crate::handlers::{
-    get_move_struct, get_owner_address, get_owner_type, AnalyticsHandler,
+    get_owner_address, get_owner_type, initial_shared_version, AnalyticsHandler,
     ObjectStatusTracker,
 };
-
+use sui_types::base_types::ObjectID;
+use sui_package_resolver::Resolver;
+use sui_rpc_api::{CheckpointData, CheckpointTransaction};
 use crate::package_store::{LocalDBPackageStore, PackageCache};
-use crate::tables::{ObjectEntry, ObjectStatus, OwnershipEntry};
-use crate::FileType;
-
-pub struct ObjectHandler {
-    state: Mutex<State>,
-    package_filter: Option<ObjectID>,
+pub struct PostgresHandler {
+    connection: PgConnection,
 }
-
+use crate::FileType;
 struct State {
-    objects: Vec<ObjectEntry>,
+    objects: Vec<OwnershipEntry>,
     package_store: LocalDBPackageStore,
     resolver: Resolver<PackageCache>,
 }
+use anyhow::Result;
+
+pub struct OwnershipHandler {
+    state: Mutex<State>,
+    package_filter: Option<ObjectID>,
+}
+use tracing::{info, warn};
+impl PostgresHandler {
+    pub fn new(database_url: &str) -> Self {
+        let connection = PgConnection::establish(database_url)
+            .expect(&format!("Error connecting to {}", database_url));
+        Self { connection }
+    }
+
+    pub fn insert_ownership_entries(&self, current_entry: &mut OwnershipEntry, previous_entry: Option<OwnershipEntry>) -> Result<(), Error> {
+        use crate::schema::ownership::dsl::*;
+
+        // Insert entry for the previous owner with balance 0 if ownership changed
+        if let Some(prev_entry) = previous_entry {
+            if prev_entry.owner_address != current_entry.owner_address {
+                let transfer_out_entry = OwnershipEntry {
+                    object_id: prev_entry.object_id.clone(),
+                    version: prev_entry.version,
+                    checkpoint: prev_entry.checkpoint,
+                    epoch: prev_entry.epoch,
+                    timestamp_ms: prev_entry.timestamp_ms,
+                    owner_type: prev_entry.owner_type.clone(),
+                    owner_address: prev_entry.owner_address.clone(),
+                    object_status: "Transfer Out".to_string(),
+                    previous_transaction: prev_entry.previous_transaction.clone(),
+                    coin_type: prev_entry.coin_type.clone(),
+                    coin_balance: 0,
+                    previous_owner: prev_entry.previous_owner.clone(),
+                    previous_version: prev_entry.previous_version,
+                    previous_checkpoint: prev_entry.previous_checkpoint,
+                    previous_coin_type: prev_entry.previous_coin_type.clone(),
+                    previous_type: prev_entry.previous_type.clone(),
+                };
+                info!("Previous entry exists {:?}", prev_entry.object_id.clone());
+                info!("current entry exists {:?}", current_entry.object_id);
+                diesel::insert_into(ownership)
+                    .values(&transfer_out_entry)
+                    .execute(&self.connection)?;
+                current_entry.object_status = "Transfer In".to_string();            
+            } else {
+                current_entry.object_status = "Mutated".to_string();
+            }
+        } else {
+            current_entry.object_status = "Created".to_string();
+        }
+
+        // Insert entry for the current owner
+        diesel::insert_into(ownership)
+            .values(&*current_entry)
+            .execute(&self.connection)?;
+
+        Ok(())
+    }
+
+    pub fn get_previous_entry(&self, object_id: &str) -> Result<Option<OwnershipEntry>, Error> {
+        use crate::schema::ownership::dsl::*;
+        ownership
+            .filter(object_id.eq(object_id))
+            .order(version.desc())
+            .first::<OwnershipEntry>(&self.connection)
+            .optional()
+    }
+
+
+}
 
 #[async_trait::async_trait]
-impl Worker for ObjectHandler {
+impl Worker for OwnershipHandler {
     type Result = ();
 
     async fn process_checkpoint(&self, checkpoint_data: &CheckpointData) -> Result<()> {
@@ -47,7 +109,30 @@ impl Worker for ObjectHandler {
             ..
         } = checkpoint_data;
         let mut state = self.state.lock().await;
+
         for checkpoint_transaction in checkpoint_transactions {
+            // for object in &checkpoint_transaction.output_objects {
+            //     println!(
+            //         "Output Object ID: {:?}, Balance: {:?}, Owner Address: {:?}",
+            //         object.id(),
+            //         if object.coin_type_maybe().is_some() {
+            //             object.get_coin_value_unsafe().try_into().unwrap()
+            //         } else {
+            //             0
+            //         },
+            //         get_owner_address(object)
+            //     );
+            // }
+
+            // Print input_objects and their object_ids, balances, and owner_addresses
+            let object_status_tracker = ObjectStatusTracker::new(effects);
+            for object in &checkpoint_transaction.all_removed_objects {
+                println!(
+                    "Input Object ID: {:?}, Owner Address: {:?}",
+                    object.id(),
+                    get_owner_address(object),
+                );
+            }
             for object in checkpoint_transaction.output_objects.iter() {
                 state.package_store.update(object)?;
             }
@@ -72,8 +157,8 @@ impl Worker for ObjectHandler {
 }
 
 #[async_trait::async_trait]
-impl AnalyticsHandler<ObjectEntry> for ObjectHandler {
-    async fn read(&self) -> Result<Vec<ObjectEntry>> {
+impl AnalyticsHandler<OwnershipEntry> for OwnershipHandler {
+    async fn read(&self) -> Result<Vec<OwnershipEntry>> {
         let mut state = self.state.lock().await;
         let cloned = state.objects.clone();
         state.objects.clear();
@@ -81,17 +166,19 @@ impl AnalyticsHandler<ObjectEntry> for ObjectHandler {
     }
 
     fn file_type(&self) -> Result<FileType> {
-        Ok(FileType::Object)
+        Ok(FileType::Ownership)
     }
 
     fn name(&self) -> &str {
-        "object"
+        "ownership"
     }
 }
 
-impl ObjectHandler {
+
+impl OwnershipHandler {
     pub fn new(store_path: &Path, rest_uri: &str, package_filter: &Option<String>) -> Self {
         let package_store = LocalDBPackageStore::new(&store_path.join("object"), rest_uri);
+        
         let state = State {
             objects: vec![],
             package_store: package_store.clone(),
@@ -104,6 +191,7 @@ impl ObjectHandler {
                 .map(|x| ObjectID::from_hex_literal(&x).unwrap()),
         }
     }
+
     async fn process_transaction(
         &self,
         epoch: u64,
@@ -126,33 +214,37 @@ impl ObjectHandler {
             .await?;
         }
         for (object_ref, _) in effects.all_removed_objects().iter() {
-            let entry = ObjectEntry {
+                // get_owner_address(&object);
+            println!("Deleted Object Ref: {:?}", object_ref);
+            // info!(
+            //     "Deleted Object ID: {:?}, Version: {:?}, Owner Address: {:?}",
+            //     object_ref.0,
+            //     object_ref.1.value(),
+            //     // get_owner_address(&object);
+            // );
+            let entry = OwnershipEntry {
                 object_id: object_ref.0.to_string(),
-                digest: object_ref.2.to_string(),
-                version: u64::from(object_ref.1),
-                type_: None,
-                checkpoint,
-                epoch,
-                timestamp_ms,
+                version: object_ref.1.value().try_into().unwrap(),
+                checkpoint: checkpoint.try_into().unwrap(),
+                epoch: epoch.try_into().unwrap(),
+                timestamp_ms: timestamp_ms.try_into().unwrap(),
                 owner_type: None,
                 owner_address: None,
-                object_status: ObjectStatus::Deleted,
-                initial_shared_version: None,
+                object_status: "Deleted".to_string(),
                 previous_transaction: checkpoint_transaction.transaction.digest().base58_encode(),
-                has_public_transfer: false,
-                storage_rebate: None,
-                bcs: None,
                 coin_type: None,
-                coin_balance: None,
-                struct_tag: None,
-                object_json: None,
+                coin_balance: 0,
+                previous_owner: None,
+                previous_version: None,
+                previous_checkpoint: None,
+                previous_coin_type: None,
+                previous_type: None,
             };
             state.objects.push(entry);
         }
         Ok(())
     }
-    // Object data. Only called if there are objects in the transaction.
-    // Responsible to build the live object table.
+
     async fn process_object(
         &self,
         epoch: u64,
@@ -162,33 +254,14 @@ impl ObjectHandler {
         object_status_tracker: &ObjectStatusTracker,
         state: &mut State,
     ) -> Result<()> {
-        // Only process if it's a Sui coin
         let move_obj_opt = object.data.try_as_move();
         let has_public_transfer = move_obj_opt
             .map(|o| o.has_public_transfer())
             .unwrap_or(false);
-        let move_struct = if let Some((tag, contents)) = object
-            .struct_tag()
-            .and_then(|tag| object.data.try_as_move().map(|mo| (tag, mo.contents())))
-        {
-            let move_struct = get_move_struct(&tag, contents, &state.resolver).await?;
-            Some(move_struct)
-        } else {
-            None
-        };
-        let (struct_tag, sui_move_struct) = if let Some(move_struct) = move_struct {
-            match move_struct.into() {
-                SuiMoveStruct::WithTypes { type_, fields } => {
-                    (Some(type_), Some(SuiMoveStruct::WithFields(fields)))
-                }
-                fields => (object.struct_tag(), Some(fields)),
-            }
-        } else {
-            (None, None)
-        };
+
+        state.package_store.update(object)?;
 
         let object_type = move_obj_opt.map(|o| o.type_());
-
         let is_match = if let Some(package_id) = self.package_filter {
             if let Some(move_object_type) = object_type {
                 let object_package_id: ObjectID = move_object_type.address().into();
@@ -204,96 +277,49 @@ impl ObjectHandler {
             return Ok(());
         }
         let object_id = object.id();
+        let status = object_status_tracker.get_object_status(&object_id);
 
-        let status = object_status_tracker
-        .get_object_status(&object_id)
-        .expect("Object must be in output objects");
-    
-        // Check if it's Mutated and add mutated logic query postgres
-        let mut client = Client::connect("host=localhost user=postgres", NoTls)?;
+        if object_type.map(|t| t.to_string()) == Some("0x2::coin::Coin<0x2::sui::SUI>".to_string()) {
+            let database_url = "postgres://davidyun:postgres@localhost/sui_indexer";
+            let postgres_handler = PostgresHandler::new(&database_url);
+            let mut current_entry = OwnershipEntry {
+                object_id: object_id.to_string(),
+                version: object.version().value().try_into().unwrap(),
+                checkpoint: checkpoint.try_into().unwrap(),
+                epoch: epoch.try_into().unwrap(),
+                timestamp_ms: timestamp_ms.try_into().unwrap(),
+                owner_type: Some(get_owner_type(object)).map(|ot| ot.to_string()),
+                owner_address: get_owner_address(object),
+                object_status: object_status_tracker
+                    .get_object_status(&object_id)
+                    .expect("Object must be in output objects")
+                    .to_string(),
+                previous_transaction: object.previous_transaction.base58_encode(),
+                coin_type: object.coin_type_maybe().map(|t| t.to_string()),
+                coin_balance: if object.coin_type_maybe().is_some() {
+                    object.get_coin_value_unsafe().try_into().unwrap()
+                } else {
+                    0
+                },
+                previous_owner: None,
+                previous_version: None,
+                previous_checkpoint: None,
+                previous_coin_type: None,
+                previous_type: None,
+            };
 
-        //Sui Analytics Indexer doesn't saveq
-         data into postgres only the Sui-Indexer we need to modify the analytics indexer code to save objects data into postgresql so that
-        //we can query the previous version.
+        if current_entry.object_status == "Mutated" {
+            // Get the previous entry for the object
+            let previous_entry = postgres_handler.get_previous_entry(&object_id.to_string())?;
 
-        if status.to_string() != "Mutated" {
-            let rows = client.execute(
-                "WITH LatestPreviousState AS (
-                    SELECT 
-                        owner_address AS previous_owner,
-                        version AS previous_version,
-                        checkpoint AS previous_checkpoint,
-                        coin_type AS previous_coin_type,
-                        type_ AS previous_type,
-                        coin_balance AS previous_balance
-                    FROM objects
-                    WHERE object_id = $1
-                    AND version < $2
-                    ORDER BY version DESC
-                    LIMIT 1
-                )
-                SELECT 
-                    CASE 
-                        WHEN previous_owner IS NULL THEN 'New Owner'
-                        WHEN $3 = previous_owner THEN 'Balance Change'
-                        WHEN $3 != previous_owner THEN 
-                            CASE 
-                                WHEN previous_owner IS NOT NULL THEN 'Transfer In'
-                                ELSE 'Transfer Out'
-                            END
-                    END AS transfer_type,
-                    previous_owner,
-                    previous_version,
-                    previous_checkpoint,
-                    previous_coin_type,
-                    previous_type,
-                    previous_balance,
-                    $3 AS current_owner
-                FROM LatestPreviousState
-                WHERE previous_owner IS NOT NULL OR $3 IS NOT NULL;
-                ",
-                &[
-                    &object.id().to_string(),
-                    &(object.version().value() as i64),
-                    &get_owner_address(object).unwrap_or_default(),
-                ],
-            )?;
-        
+            // Insert ownership entries
+            postgres_handler.insert_ownership_entries(&mut current_entry, previous_entry)?;
+        } else if current_entry.object_status == "Created" {
+            // Insert ownership entry without previous entry logic
+            postgres_handler.insert_ownership_entries(&mut current_entry, None)?;
         }
-
-        if status.to_string() != "Deleted" {
-            return Ok(());
+            state.objects.push(current_entry);
         }
-
-
-        let entry = OwnershipEntry {
-            object_id: object_id.to_string(),
-            version: object.version().value(),
-            checkpoint,
-            epoch,
-            timestamp_ms,
-            owner_type: Some(get_owner_type(object)),
-            owner_address: get_owner_address(object),
-            object_status: object_status_tracker
-                .get_object_status(&object_id)
-                .expect("Object must be in output objects"),            
-            coin_type: object.coin_type_maybe().map(|t| t.to_string()),
-            type_: object_type.map(|t| t.to_string()),
-            previous_transaction: object.previous_transaction.base58_encode(),
-            coin_balance: if object.coin_type_maybe().is_some() {
-                Some(object.get_coin_value_unsafe())
-            } else {
-                None
-            },
-            // Previous fields will be added when we handle mutations
-            previous_owner: None,
-            previous_version: None,
-            previous_checkpoint: None,
-            previous_coin_type: None,
-            previous_type: None,
-        };
-    
-        state.objects.push(entry);
         Ok(())
     }
 }

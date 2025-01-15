@@ -18,7 +18,7 @@ use typed_store::traits::TableSummary;
 use typed_store::traits::TypedStoreDebug;
 use typed_store::DBMapUtils;
 use typed_store::{Map, TypedStoreError};
-
+use tracing::info;
 const STORE: &str = "RocksDB";
 
 #[derive(Error, Debug)]
@@ -97,13 +97,20 @@ impl LocalDBPackageStore {
         {
             object
         } else {
-            let object = self
+            match self
                 .fallback_client
                 .get_object(ObjectID::from(id))
                 .await
-                .map_err(|_| PackageResolverError::PackageNotFound(id))?;
-            self.update(&object)?;
-            object
+            {
+                Ok(object) => {
+                    self.update(&object)?;
+                    object
+                }
+                Err(e) => {
+                    info!("Error fetching object from fallback client: {:?}", e);
+                    return Err(PackageResolverError::PackageNotFound(id).into());
+                }
+            }
         };
         Ok(object)
     }
