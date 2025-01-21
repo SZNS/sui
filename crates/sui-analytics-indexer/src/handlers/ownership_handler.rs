@@ -1,14 +1,12 @@
 use anyhow::Result;
 use std::path::Path;
 use sui_data_ingestion_core::Worker;
-use sui_types::SYSTEM_PACKAGE_ADDRESSES;
 use tokio::sync::Mutex;
 
 use sui_package_resolver::Resolver;
 use sui_rpc_api::{CheckpointData, CheckpointTransaction};
 use sui_types::base_types::ObjectID;
 use sui_types::effects::TransactionEffects;
-use sui_types::object::Object;
 
 use crate::handlers::{get_owner_address, get_owner_type, AnalyticsHandler, ObjectStatusTracker};
 use crate::package_store::{LocalDBPackageStore, PackageCache};
