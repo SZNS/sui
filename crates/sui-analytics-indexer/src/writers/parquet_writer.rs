@@ -106,7 +106,7 @@ impl<S: Serialize + ParquetSchema> AnalyticsWriter<S> for ParquetWriter {
         let mut batch_data = vec![];
         for column in std::mem::take(&mut self.data) {
             convert_to_arrow_array!(column, batch_data,
-                ParquetValue::U64 => UInt64Array, ParquetValue::Str => StringArray, ParquetValue::OptionU64 => UInt64Array, ParquetValue::OptionStr => StringArray, ParquetValue::Bool => BooleanArray, ParquetValue::I64 => Int64Array
+                ParquetValue::U64 => UInt64Array, ParquetValue::Str => StringArray, ParquetValue::OptionU64 => UInt64Array, ParquetValue::OptionStr => StringArray, ParquetValue::Bool => BooleanArray, ParquetValue::I64 => Int64Array, ParquetValue::Optioni64 => Int64Array
             );
         }
         let batch = RecordBatch::try_from_iter(S::schema().iter().zip(batch_data.into_iter()))?;
