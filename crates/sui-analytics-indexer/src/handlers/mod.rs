@@ -19,7 +19,6 @@ use sui_types::transaction::TransactionDataAPI;
 
 use crate::tables::{InputObjectKind, ObjectStatus, OwnerType};
 use crate::FileType;
-use tracing::info;
 
 pub mod checkpoint_handler;
 pub mod df_handler;

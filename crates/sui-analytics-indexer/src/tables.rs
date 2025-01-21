@@ -7,11 +7,6 @@ use serde::Serialize;
 use strum_macros::Display;
 use sui_analytics_indexer_derive::SerializeParquet;
 use sui_types::dynamic_field::DynamicFieldType;
-extern crate diesel;
-
-use diesel::prelude::*;
-use diesel::Insertable;
-use crate::schema::ownership;
 
 // Table entries for the analytics database.
 // Each entry is a row in the database.
@@ -276,23 +271,22 @@ pub(crate) struct WrappedObjectEntry {
 }
 
 
-#[derive(Serialize, Clone, SerializeParquet, Insertable, Queryable)]
-#[table_name = "ownership"]
+#[derive(Serialize, Clone, SerializeParquet, Debug)]
 pub(crate) struct OwnershipEntry {
     pub(crate) object_id: String,
-    pub(crate) version: i64,
-    pub(crate) checkpoint: i64,
-    pub(crate) epoch: i64,
-    pub(crate) timestamp_ms: i64,
+    pub(crate) version: u64,
+    pub(crate) checkpoint: u64,
+    pub(crate) epoch: u64,
+    pub(crate) timestamp_ms: u64,
     pub(crate) owner_type: Option<String>,
     pub(crate) owner_address: Option<String>,
     pub(crate) object_status: String,
     pub(crate) previous_transaction: String,
     pub(crate) coin_type: Option<String>,
-    pub(crate) coin_balance: i64,
+    pub(crate) coin_balance: u64,
     pub(crate) previous_owner: Option<String>,
-    pub(crate) previous_version: Option<i64>,
-    pub(crate) previous_checkpoint: Option<i64>,
+    pub(crate) previous_version: Option<u64>,
+    pub(crate) previous_checkpoint: Option<u64>,
     pub(crate) previous_coin_type: Option<String>,
     pub(crate) previous_type: Option<String>,
 }

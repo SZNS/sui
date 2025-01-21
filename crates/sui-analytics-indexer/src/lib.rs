@@ -52,13 +52,10 @@ use crate::writers::AnalyticsWriter;
 pub mod analytics_metrics;
 pub mod analytics_processor;
 pub mod errors;
-pub mod schema;
 mod handlers;
 mod package_store;
 pub mod tables;
 mod writers;
-#[macro_use]
-extern crate diesel;
 
 const EPOCH_DIR_PREFIX: &str = "epoch_";
 const CHECKPOINT_DIR_PREFIX: &str = "checkpoints";
@@ -401,12 +398,6 @@ impl From<String> for ParquetValue {
 impl From<Option<u64>> for ParquetValue {
     fn from(value: Option<u64>) -> Self {
         Self::OptionU64(value)
-    }
-}
-
-impl From<Option<i64>> for ParquetValue {
-    fn from(value: Option<i64>) -> Self {
-        Self::Optioni64(value)
     }
 }
 

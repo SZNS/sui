@@ -12,7 +12,6 @@ use tokio::sync::Mutex;
 use crate::handlers::AnalyticsHandler;
 use crate::tables::MovePackageEntry;
 use crate::FileType;
-use tracing::info;
 
 pub struct PackageHandler {
     state: Mutex<State>,
@@ -104,7 +103,6 @@ impl PackageHandler {
                 transaction_digest: object.previous_transaction.to_string(),
                 original_package_id: Some(original_package_id.to_string()),
             };
-            info!("HELLLLOOO {} for workflow {}", package_id, original_package_id);
             state.packages.push(package)
         }
         Ok(())
