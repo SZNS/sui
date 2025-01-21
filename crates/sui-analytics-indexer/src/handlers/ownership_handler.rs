@@ -86,12 +86,12 @@ impl OwnershipHandler {
         //Process output_objects to get new ownership information and compare with old ownership
         for object in checkpoint_transaction.output_objects.iter() {
             if object.coin_type_maybe().map(|t| t.to_string()) == Some("0x2::sui::SUI".to_string()) {
-                // state.package_store.update(object)?;
                 let new_owner_address = get_owner_address(object);
                 let object_id = object.id();
                 if let Some((_, old_entry)) = old_ownership_entries.iter().find(|(id, _)| id == &object_id) {
                     if old_entry.owner_address != new_owner_address {
-                        //Ownership has changed. Create a "Transfer Out" entry for the old owner
+                        //Ownership has changed if owner_address is not the same. 
+                        //Create a "Transfer Out" entry for the old owner
                         let transfer_out_entry = OwnershipEntry {
                             object_id: object_id.to_string(),
                             version: object.version().value().try_into().unwrap(),
@@ -112,7 +112,7 @@ impl OwnershipHandler {
                         };
                         state.objects.push(transfer_out_entry);
 
-                        //Entry for the new owner
+                        //Create entry for the new owner
                         let new_entry = OwnershipEntry {
                             object_id: object_id.to_string(),
                             version: object.version().value().try_into().unwrap(),
